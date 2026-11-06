@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Motion Coach – Project Ascent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;900&display=swap" rel="stylesheet">
+<style>
+  :root { --navy:#27325A; --blue:#009FE3; --deep:#006CA3; --grey:#F3F3F3; --text-2:#666; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Outfit',system-ui,sans-serif; color:var(--navy); background:#fff; }
+  header { padding:16px; display:flex; align-items:center; gap:12px; }
+  .logo { display:inline-flex; flex-direction:column; line-height:.88; font-weight:900; font-size:26px; }
+  .logo small { font-weight:400; font-size:11px; color:var(--deep); align-self:flex-end; margin-top:3px; line-height:1; }
+  h1 { margin:0; font-size:18px; font-weight:900; text-transform:uppercase; }
+  .label { font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--deep); }
+  main { max-width:960px; margin:0 auto; padding:0 16px 32px; display:flex; flex-direction:column; gap:14px; }
+  .stage { position:relative; width:100%; background:var(--navy); aspect-ratio:16/9; overflow:hidden; }
+  .stage video, .stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  .stage canvas { touch-action:manipulation; }
+  .placeholder[hidden] { display:none; }
+  .placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:300; padding:24px; text-align:center; }
+  .status { min-height:56px; padding:12px 16px; background:var(--grey); display:flex; align-items:center; gap:12px; font-size:16px; }
+  .status b { font-weight:900; text-transform:uppercase; }
+  .status.good { background:var(--blue); }
+  .status.bad { background:var(--navy); color:#fff; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  button, .pill { font-family:inherit; height:44px; padding:0 18px; border-radius:35px; border:2px solid var(--navy);
+    background:#fff; color:var(--navy); font-size:13px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; }
+  button.primary { background:var(--navy); color:#fff; }
+  button[aria-pressed="true"] { background:var(--navy); color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  label.check { display:flex; align-items:center; gap:8px; font-size:14px; }
+  input[type=range] { accent-color:var(--deep); }
+  details { background:var(--grey); padding:12px 16px; }
+  textarea { width:100%; min-height:90px; font-family:ui-monospace,monospace; font-size:12px; border:0; padding:8px; }
+  .hint { font-size:14px; font-weight:300; line-height:1.45; margin:0; }
+  #log { font-size:13px; font-weight:300; max-height:120px; overflow:auto; margin:0; padding-left:18px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" role="img" aria-label="ART ROCK pure climbing">ART<br>ROCK<small>pure climbing</small></div>
+  <div><div class="label">Project Ascent</div><h1>Motion coach</h1></div>
+</header>
+
+<main>
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay" aria-label="Camera view. In route mode, tap a hold to add it."></canvas>
+    <div class="placeholder" id="placeholder">Put the phone on a tripod facing the wall, then press “Start camera”.</div>
+  </div>
+
+  <div class="status" id="status" aria-live="polite"><span id="statusText">Not started</span></div>
+
+  <div class="row">
+    <button class="primary" id="btnCamera">Start camera</button>
+    <span class="label" id="modelState">Loading body tracking…</span>
+  </div>
+
+  <section aria-labelledby="h-route">
+    <div class="label" id="h-route">1 · Set the route</div>
+    <p class="hint">Tap holds on the video in climbing order. Switch to “Other hold” to mark holds that are not part of the route, so grabbing them counts as wrong.</p>
+    <div class="row">
+      <button id="btnRouteMode" aria-pressed="true">Route hold</button>
+      <button id="btnOtherMode" aria-pressed="false">Other hold</button>
+      <button id="btnUndo">Undo</button>
+      <button id="btnClear">Clear</button>
+      <label class="check">Hold size <input type="range" id="radius" min="15" max="90" value="40"></label>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-climb">
+    <div class="label" id="h-climb">2 · Climb</div>
+    <div class="row">
+      <button class="primary" id="btnClimb" disabled>Start climbing</button>
+      <button id="btnReset" disabled>Restart attempt</button>
+      <label class="check"><input type="checkbox" id="chkFeet"> Count feet too</label>
+      <label class="check"><input type="checkbox" id="chkSpeak" checked> Spoken feedback</label>
+    </div>
+    <ol id="log"></ol>
+  </section>
+
+  <details>
+    <summary class="label">Route data (JSON)</summary>
+    <p class="hint">Coordinates are in video pixels. Paste a route from your app here and press Load.</p>
+    <textarea id="json" spellcheck="false"></textarea>
+    <div class="row"><button id="btnLoad">Load</button></div>
+  </details>
+</main>
+
+<script type="module">
+import { loadPose, startCamera, createSounds, createMotionCoach, SKELETON } from './motion-coach.js';
+
+const $ = (id) => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+const sounds = createSounds({ speak: true });
+
+let pose = null, coach = null;
+let route = [], others = [];
+let tapMode = 'route';
+let last = { landmarks: null, points: [], fps: 0 };
+let flash = null; // { id, type, until }
+
+// ---------- model ----------
+loadPose()
+  .then((p) => { pose = p; $('modelState').textContent = 'Body tracking ready'; refresh(); })
+  .catch((e) => { $('modelState').textContent = 'Body tracking failed to load: ' + e.message; console.error(e); });
+
+// ---------- camera ----------
+$('btnCamera').onclick = async () => {
+  sounds.unlock();
+  try {
+    await startCamera(video);
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    $('stage').style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+    $('placeholder').hidden = true;
+    $('btnCamera').disabled = true;
+    setStatus('Camera on. Tap the holds of your route.');
+    requestAnimationFrame(draw);
+    refresh();
+  } catch (e) {
+    setStatus('Camera error: ' + e.message, 'bad');
+  }
+};
+
+// ---------- route editing ----------
+$('btnRouteMode').onclick = () => setTapMode('route');
+$('btnOtherMode').onclick = () => setTapMode('other');
+function setTapMode(m) {
+  tapMode = m;
+  $('btnRouteMode').setAttribute('aria-pressed', m === 'route');
+  $('btnOtherMode').setAttribute('aria-pressed', m === 'other');
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!video.videoWidth || coach?.running) return;
+  const r = canvas.getBoundingClientRect();
+  // object-fit: contain -> work out where the video sits inside the box
+  const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+  const offX = (r.width - canvas.width * scale) / 2, offY = (r.height - canvas.height * scale) / 2;
+  const x = (e.clientX - r.left - offX) / scale, y = (e.clientY - r.top - offY) / scale;
+  if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return;
+  const radius = +$('radius').value;
+  const hold = { id: (tapMode === 'route' ? 'R' : 'O') + Date.now().toString(36), x: Math.round(x), y: Math.round(y), r: radius };
+  (tapMode === 'route' ? route : others).push(hold);
+  refresh();
+});
+
+$('btnUndo').onclick = () => { (tapMode === 'route' ? route : others).pop(); refresh(); };
+$('btnClear').onclick = () => { route = []; others = []; refresh(); };
+$('radius').oninput = () => { const r = +$('radius').value; [...route, ...others].forEach((h) => (h.r = r)); refresh(); };
+
+$('btnLoad').onclick = () => {
+  try {
+    const data = JSON.parse($('json').value);
+    route = data.route ?? []; others = data.others ?? [];
+    refresh();
+  } catch (e) { setStatus('Could not read JSON: ' + e.message, 'bad'); }
+};
+
+// ---------- climbing ----------
+$('btnClimb').onclick = () => {
+  sounds.unlock();
+  if (coach?.running) { coach.stop(); coach = null; setStatus('Stopped. You can edit the route.'); refresh(); return; }
+  coach = createMotionCoach({
+    pose, video, sounds,
+    route, allHolds: [...route, ...others],
+    trackFeet: $('chkFeet').checked,
+    onEvent: (ev) => {
+      flash = { id: ev.hold.id, type: ev.type, until: performance.now() + 800 };
+      if (ev.type === 'correct') { setStatus(`Hold ${ev.index + 1} – good!`, 'good'); log(`✓ Hold ${ev.index + 1}`); }
+      if (ev.type === 'top') { setStatus('Top! Route complete.', 'good'); log('★ Top'); }
+      if (ev.type === 'wrong') { setStatus('Wrong hold', 'bad'); log('✗ Wrong hold'); }
+    },
+    onFrame: (f) => { last = f; },
+  });
+  $('log').innerHTML = '';
+  coach.start();
+  setStatus('Climb! Go for hold 1.');
+  refresh();
+};
+$('btnReset').onclick = () => { coach?.reset(); $('log').innerHTML = ''; setStatus('Restarted. Go for hold 1.'); };
+$('chkFeet').onchange = () => { if (coach) coach.trackFeet = $('chkFeet').checked; };
+$('chkSpeak').onchange = () => { sounds.speak = $('chkSpeak').checked; };
+
+// ---------- drawing ----------
+function draw() {
+  requestAnimationFrame(draw);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const now = performance.now();
+  const next = coach?.running ? coach.nextIndex : -1;
+
+  for (const h of others) ring(h, '#FFFFFF', 3, [8, 6]);
+  route.forEach((h, i) => {
+    let color = '#FFFFFF';
+    if (coach?.running && i < next) color = '#009FE3';           // done
+    if (i === next) color = '#009FE3';                           // next target
+    if (flash && flash.id === h.id && now < flash.until) color = flash.type === 'wrong' ? '#E5484D' : '#009FE3';
+    ring(h, color, i === next ? 7 : 4);
+    badge(h, String(i + 1), i < next);
+  });
+  if (flash && now < flash.until && flash.type === 'wrong') {
+    const h = others.find((o) => o.id === flash.id); if (h) ring(h, '#E5484D', 7);
+  }
+
+  if (last.landmarks) {
+    const W = canvas.width, H = canvas.height;
+    ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 4;
+    for (const [a, b] of SKELETON) {
+      const p = last.landmarks[a], q = last.landmarks[b];
+      if (!p || !q) continue;
+      ctx.beginPath(); ctx.moveTo(p.x * W, p.y * H); ctx.lineTo(q.x * W, q.y * H); ctx.stroke();
+    }
+    ctx.fillStyle = '#009FE3';
+    for (const p of last.points) { ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, Math.PI * 2); ctx.fill(); }
+  }
+  if (coach?.running) {
+    ctx.fillStyle = 'rgba(39,50,90,.85)'; ctx.fillRect(10, 10, 110, 34);
+    ctx.fillStyle = '#fff'; ctx.font = '600 18px Outfit, sans-serif';
+    ctx.fillText(`${Math.round(last.fps || 0)} fps`, 22, 34);
+  }
+}
+function ring(h, color, width, dash = []) {
+  ctx.setLineDash(dash); ctx.strokeStyle = '#27325A'; ctx.lineWidth = width + 4;
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+}
+function badge(h, text, done) {
+  const x = h.x + h.r * 0.8, y = h.y - h.r * 0.8;
+  ctx.fillStyle = done ? '#009FE3' : '#27325A';
+  ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = done ? '#27325A' : '#fff'; ctx.font = '900 18px Outfit, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y + 1);
+  ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+}
+
+// ---------- helpers ----------
+function refresh() {
+  const camOn = !!video.videoWidth;
+  const running = !!coach?.running;
+  $('btnClimb').disabled = !(pose && camOn && route.length);
+  $('btnClimb').textContent = running ? 'Stop' : 'Start climbing';
+  $('btnReset').disabled = !running;
+  for (const id of ['btnRouteMode', 'btnOtherMode', 'btnUndo', 'btnClear', 'radius']) $(id).disabled = running;
+  $('json').value = JSON.stringify({ video: { width: video.videoWidth, height: video.videoHeight }, route, others }, null, 1);
+}
+function setStatus(text, kind = '') {
+  $('status').className = 'status ' + kind;
+  $('statusText').textContent = text;
+}
+function log(text) {
+  const li = document.createElement('li'); li.textContent = text; $('log').prepend(li);
+}
+</script>
+</body>
+</html>
